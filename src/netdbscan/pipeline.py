@@ -6,9 +6,11 @@ import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
+from urllib.parse import quote
 
 import geopandas as gpd
 import numpy as np
+import pandas as pd
 
 from .clustering import canonical_point_order, cluster_precomputed
 from .io import (
@@ -156,3 +158,92 @@ def cluster_files(
     )
     write_geoparquet(output_path, result, force=force)
     return result
+
+def _group_output_token(value) -> str:
+    """Return a filesystem-safe token for one group value."""
+    if pd.isna(value):
+        return "__null__"
+    text = str(value)
+    if text == "":
+        return "__blank__"
+    return quote(text, safe="-_.~")
+
+
+def cluster_files_by_column(
+    *,
+    points_path: str | Path,
+    boundary_path: str | Path,
+    network_path: str | Path,
+    output_dir: str | Path,
+    group_col: str,
+    config: NetDBSCANConfig,
+    point_id_col: str = "point_id",
+    points_layer: str | None = None,
+    boundary_layer: str | None = None,
+    network_layer: str | None = None,
+    force: bool = False,
+) -> list[Path]:
+    """Cluster each unique value of ``group_col`` independently.
+
+    Inputs are read once. Each unique point-layer value is subsetted, passed
+    through the normal clustering pipeline, and written to its own GeoParquet
+    file in ``output_dir``. Null and blank values are retained as groups.
+
+    Cluster IDs restart independently within each group.
+    """
+    points = read_vector(points_path, name="points", layer=points_layer)
+    boundary = read_vector(boundary_path, name="boundary", layer=boundary_layer)
+    network = read_vector(network_path, name="network", layer=network_layer)
+
+    if group_col not in points.columns:
+        raise ValueError(f"group column {group_col!r} not found")
+
+    values = list(pd.unique(points[group_col]))
+    values.sort(
+        key=lambda value: (
+            1 if pd.isna(value) else 0,
+            "" if pd.isna(value) else str(value),
+        )
+    )
+
+    output_dir = Path(output_dir)
+    planned: list[tuple[object, Path]] = []
+    seen_names: dict[str, object] = {}
+    for value in values:
+        token = _group_output_token(value)
+        filename = f"group_{token}.parquet"
+        if filename in seen_names:
+            other = seen_names[filename]
+            raise ValueError(
+                f"group values {other!r} and {value!r} map to the same output filename "
+                f"{filename!r}; clean or recode {group_col!r}"
+            )
+        seen_names[filename] = value
+        planned.append((value, output_dir / filename))
+
+    # Refuse before any clustering so a pre-existing group output cannot leave
+    # a partially updated folder.
+    if not force:
+        existing = [path for _, path in planned if path.exists()]
+        if existing:
+            raise FileExistsError(
+                f"output already exists: {existing[0]}; pass force=True or --force"
+            )
+
+    outputs: list[Path] = []
+    for value, output_path in planned:
+        if pd.isna(value):
+            mask = points[group_col].isna()
+        else:
+            mask = points[group_col].eq(value)
+        subset = points.loc[mask].copy().reset_index(drop=True)
+        result = cluster_geodataframes(
+            points=subset,
+            boundary=boundary,
+            network=network,
+            config=config,
+            point_id_col=point_id_col,
+        )
+        outputs.append(write_geoparquet(output_path, result, force=force))
+
+    return outputs

@@ -78,6 +78,28 @@ For a multi-layer GeoPackage, specify the layer explicitly with `--points-layer`
 
 Use `--max-snap-distance` to refuse observations that are implausibly far from the supplied network, and `--max-neighbor-pairs` to cap sparse-neighbour memory use.
 
+
+### Batch by a point-layer column
+
+To run DBSCAN independently for every unique value of a column, use `batch`:
+
+```powershell
+netdbscan batch `
+  --points "data\points.parquet" `
+  --boundary "data\boundary.gpkg" `
+  --network "data\roads.gpkg" `
+  --group-col "io16_map_code" `
+  --point-id-col "canonical_id" `
+  --eps 100 `
+  --min-samples 5 `
+  --output-dir "output\io16"
+```
+
+Each unique value is clustered independently and written as one GeoParquet
+file, for example `group_03.parquet`. Null values are written to
+`group___null__.parquet` and blank strings to `group___blank__.parquet`.
+Cluster IDs restart within each group.
+
 ## Python API
 
 ```python

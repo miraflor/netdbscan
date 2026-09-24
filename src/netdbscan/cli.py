@@ -4,7 +4,7 @@ from pathlib import Path
 
 import typer
 
-from .pipeline import NetDBSCANConfig, cluster_files
+from .pipeline import NetDBSCANConfig, cluster_files, cluster_files_by_column
 
 app = typer.Typer(add_completion=False, help="DBSCAN clustering by shortest-path distance along a line network.")
 
@@ -55,6 +55,50 @@ def run(
         f"wrote {len(result)} boundary-covered points; "
         f"clusters={n_clusters}; noise={int(result['is_noise'].sum())}; output={output}"
     )
+
+
+@app.command()
+def batch(
+    points: Path = typer.Option(..., "--points", help="Point layer (.parquet/.geoparquet/.gpkg/.shp)."),
+    boundary: Path = typer.Option(..., "--boundary", help="Polygon boundary (.parquet/.geoparquet/.gpkg/.shp)."),
+    network: Path = typer.Option(..., "--network", help="Line network (.parquet/.geoparquet/.gpkg/.shp); CRS must be projected."),
+    group_col: str = typer.Option(..., "--group-col", help="Point-layer column whose unique values define independent runs."),
+    output_dir: Path = typer.Option(..., "--output-dir", help="Folder for one GeoParquet output per unique group value."),
+    points_layer: str | None = typer.Option(None, "--points-layer", help="Layer name when --points is a multi-layer .gpkg."),
+    boundary_layer: str | None = typer.Option(None, "--boundary-layer", help="Layer name when --boundary is a multi-layer .gpkg."),
+    network_layer: str | None = typer.Option(None, "--network-layer", help="Layer name when --network is a multi-layer .gpkg."),
+    eps: float = typer.Option(..., "--eps", help="DBSCAN road-network radius in network-CRS units."),
+    min_samples: int = typer.Option(5, "--min-samples"),
+    point_id_col: str = typer.Option("point_id", "--point-id-col"),
+    noise_policy: str = typer.Option("exclude", "--noise-policy", help="exclude or singleton."),
+    max_snap_distance: float | None = typer.Option(None, "--max-snap-distance"),
+    max_neighbor_pairs: int = typer.Option(10_000_000, "--max-neighbor-pairs"),
+    force: bool = typer.Option(False, "--force", help="Replace existing group output files."),
+) -> None:
+    """Run netdbscan independently for every unique value in a point column."""
+    config = NetDBSCANConfig(
+        eps=eps,
+        min_samples=min_samples,
+        noise_policy=noise_policy,
+        max_snap_distance=max_snap_distance,
+        max_neighbor_pairs=max_neighbor_pairs,
+    )
+    outputs = cluster_files_by_column(
+        points_path=points,
+        boundary_path=boundary,
+        network_path=network,
+        output_dir=output_dir,
+        group_col=group_col,
+        config=config,
+        point_id_col=point_id_col,
+        points_layer=points_layer,
+        boundary_layer=boundary_layer,
+        network_layer=network_layer,
+        force=force,
+    )
+    for path in outputs:
+        typer.echo(f"wrote {path}")
+    typer.echo(f"completed {len(outputs)} grouped run(s)")
 
 
 if __name__ == "__main__":
