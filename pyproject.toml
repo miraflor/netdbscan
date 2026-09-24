@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "netdbscan"
+version = "0.1.0"
+description = "DBSCAN clustering of point observations by shortest-path distance along a spatial network"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+authors = [{name = "James Matthew Miraflor"}]
+dependencies = [
+  "geopandas>=1.0",
+  "numpy>=1.26",
+  "pandas>=2.0",
+  "pyarrow>=15",
+  "pyogrio>=0.9",
+  "scipy>=1.11",
+  "scikit-learn>=1.4",
+  "shapely>=2.0",
+  "spaghetti>=1.7.6,<2",
+  "typer>=0.12",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[project.scripts]
+netdbscan = "netdbscan.cli:app"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
