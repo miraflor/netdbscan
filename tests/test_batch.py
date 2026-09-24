@@ -37,10 +37,17 @@ def test_batch_by_column_includes_blank_and_null(monkeypatch, tmp_path):
         return {"points": points, "boundary": boundary, "network": network}[name].copy()
 
     seen_groups = []
+    graph_builds = []
 
-    def fake_cluster_geodataframes(*, points, boundary, network, config, point_id_col):
-        seen_groups.append(points["kind"].tolist())
-        result = points.copy()
+    def fake_build_road_graph(network):
+        graph = object()
+        graph_builds.append(graph)
+        return graph
+
+    def fake_cluster_prepared_points(*, inside, graph, config, point_id_col):
+        assert graph is graph_builds[0]
+        seen_groups.append(inside["kind"].tolist())
+        result = inside.copy()
         result["cluster_id"] = None
         result["is_noise"] = True
         result["is_core"] = False
@@ -56,7 +63,8 @@ def test_batch_by_column_includes_blank_and_null(monkeypatch, tmp_path):
         return Path(path)
 
     monkeypatch.setattr("netdbscan.pipeline.read_vector", fake_read_vector)
-    monkeypatch.setattr("netdbscan.pipeline.cluster_geodataframes", fake_cluster_geodataframes)
+    monkeypatch.setattr("netdbscan.pipeline.build_road_graph", fake_build_road_graph)
+    monkeypatch.setattr("netdbscan.pipeline._cluster_prepared_points", fake_cluster_prepared_points)
     monkeypatch.setattr("netdbscan.pipeline.write_geoparquet", fake_write)
 
     outputs = cluster_files_by_column(
@@ -75,6 +83,7 @@ def test_batch_by_column_includes_blank_and_null(monkeypatch, tmp_path):
         "group___null__.parquet",
     }
     assert sorted(len(group) for group in seen_groups) == [1, 1, 2]
+    assert len(graph_builds) == 1
     assert outputs == written
 
 

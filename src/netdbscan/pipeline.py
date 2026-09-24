@@ -63,44 +63,42 @@ def _check_snap_distance(point_ids, distances: np.ndarray, limit: float | None) 
         )
 
 
-def cluster_geodataframes(
-    *,
+def _prepare_inside_points(
     points: gpd.GeoDataFrame,
-    boundary: gpd.GeoDataFrame,
-    network: gpd.GeoDataFrame,
-    config: NetDBSCANConfig,
-    point_id_col: str = "point_id",
+    *,
+    analysis_crs,
+    boundary_work: gpd.GeoDataFrame,
+    point_id_col: str,
 ) -> gpd.GeoDataFrame:
-    """Cluster boundary-covered points by shortest-path distance along ``network``.
-
-    The returned geometry is the original point geometry reprojected to the
-    projected network CRS. All original point attributes are preserved and six
-    fields are appended: ``cluster_id``, ``is_noise``, ``is_core``,
-    ``snap_distance``, ``snapped_x`` and ``snapped_y``.
-    """
-    if not isinstance(config, NetDBSCANConfig):
-        raise TypeError("config must be a NetDBSCANConfig")
-
-    network_work = prepare_network(network)
-    boundary_work = prepare_boundary(boundary, network_work.crs)
-    points_work = prepare_points(points, network_work.crs, point_id_col)
+    """Validate, reproject, clip, and deterministically order one point subset."""
+    points_work = prepare_points(points, analysis_crs, point_id_col)
     inside = clip_points(points_work, boundary_work)
-
-    # Deterministic DBSCAN expansion and public cluster numbering.
     if len(inside):
         order = canonical_point_order(inside[point_id_col].tolist())
         inside = inside.iloc[order].reset_index(drop=True)
-    else:
-        result = inside.copy()
-        result["cluster_id"] = np.asarray([], dtype=object)
-        result["is_noise"] = np.asarray([], dtype=bool)
-        result["is_core"] = np.asarray([], dtype=bool)
-        result["snap_distance"] = np.asarray([], dtype=float)
-        result["snapped_x"] = np.asarray([], dtype=float)
-        result["snapped_y"] = np.asarray([], dtype=float)
-        return result
+    return inside
 
-    graph = build_road_graph(network_work)
+
+def _empty_cluster_result(inside: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
+    """Return the normal output schema for an empty boundary-covered subset."""
+    result = inside.copy()
+    result["cluster_id"] = np.asarray([], dtype=object)
+    result["is_noise"] = np.asarray([], dtype=bool)
+    result["is_core"] = np.asarray([], dtype=bool)
+    result["snap_distance"] = np.asarray([], dtype=float)
+    result["snapped_x"] = np.asarray([], dtype=float)
+    result["snapped_y"] = np.asarray([], dtype=float)
+    return result
+
+
+def _cluster_prepared_points(
+    *,
+    inside: gpd.GeoDataFrame,
+    graph,
+    config: NetDBSCANConfig,
+    point_id_col: str,
+) -> gpd.GeoDataFrame:
+    """Cluster a non-empty, already prepared point subset on a shared road graph."""
     snapped = snap_points(graph, inside, pattern_name="netdbscan_points")
     _check_snap_distance(inside[point_id_col].tolist(), snapped.snap_distance, config.max_snap_distance)
 
@@ -121,8 +119,6 @@ def cluster_geodataframes(
         position=position,
     )
 
-    # ``inside`` is already in the same canonical point-ID order used by the
-    # clustering result.
     if [str(x) for x in inside[point_id_col].tolist()] != clustered.point_keys:
         raise RuntimeError("internal point ordering changed during clustering")
     result = inside.copy()
@@ -133,6 +129,44 @@ def cluster_geodataframes(
     result["snapped_x"] = snapped.snapped_xy[:, 0]
     result["snapped_y"] = snapped.snapped_xy[:, 1]
     return result
+
+
+def cluster_geodataframes(
+    *,
+    points: gpd.GeoDataFrame,
+    boundary: gpd.GeoDataFrame,
+    network: gpd.GeoDataFrame,
+    config: NetDBSCANConfig,
+    point_id_col: str = "point_id",
+) -> gpd.GeoDataFrame:
+    """Cluster boundary-covered points by shortest-path distance along ``network``.
+
+    The returned geometry is the original point geometry reprojected to the
+    projected network CRS. All original point attributes are preserved and six
+    fields are appended: ``cluster_id``, ``is_noise``, ``is_core``,
+    ``snap_distance``, ``snapped_x`` and ``snapped_y``.
+    """
+    if not isinstance(config, NetDBSCANConfig):
+        raise TypeError("config must be a NetDBSCANConfig")
+
+    network_work = prepare_network(network)
+    boundary_work = prepare_boundary(boundary, network_work.crs)
+    inside = _prepare_inside_points(
+        points,
+        analysis_crs=network_work.crs,
+        boundary_work=boundary_work,
+        point_id_col=point_id_col,
+    )
+    if not len(inside):
+        return _empty_cluster_result(inside)
+
+    graph = build_road_graph(network_work)
+    return _cluster_prepared_points(
+        inside=inside,
+        graph=graph,
+        config=config,
+        point_id_col=point_id_col,
+    )
 
 
 def cluster_files(
@@ -185,12 +219,16 @@ def cluster_files_by_column(
 ) -> list[Path]:
     """Cluster each unique value of ``group_col`` independently.
 
-    Inputs are read once. Each unique point-layer value is subsetted, passed
-    through the normal clustering pipeline, and written to its own GeoParquet
-    file in ``output_dir``. Null and blank values are retained as groups.
+    Inputs are read once. The network and boundary are prepared once, and the
+    road graph is built at most once and reused across all non-empty groups.
+    Each unique point-layer value is still validated, clipped, snapped, and
+    clustered independently. Null and blank values are retained as groups.
 
     Cluster IDs restart independently within each group.
     """
+    if not isinstance(config, NetDBSCANConfig):
+        raise TypeError("config must be a NetDBSCANConfig")
+
     points = read_vector(points_path, name="points", layer=points_layer)
     boundary = read_vector(boundary_path, name="boundary", layer=boundary_layer)
     network = read_vector(network_path, name="network", layer=network_layer)
@@ -230,6 +268,13 @@ def cluster_files_by_column(
                 f"output already exists: {existing[0]}; pass force=True or --force"
             )
 
+    network_work = prepare_network(network)
+    boundary_work = prepare_boundary(boundary, network_work.crs)
+
+    # Building the road graph is the expensive network-level setup. Delay it
+    # until the first group with at least one boundary-covered point, then
+    # reuse the same immutable graph for every remaining group.
+    graph = None
     outputs: list[Path] = []
     for value, output_path in planned:
         if pd.isna(value):
@@ -237,13 +282,23 @@ def cluster_files_by_column(
         else:
             mask = points[group_col].eq(value)
         subset = points.loc[mask].copy().reset_index(drop=True)
-        result = cluster_geodataframes(
-            points=subset,
-            boundary=boundary,
-            network=network,
-            config=config,
+        inside = _prepare_inside_points(
+            subset,
+            analysis_crs=network_work.crs,
+            boundary_work=boundary_work,
             point_id_col=point_id_col,
         )
+        if len(inside):
+            if graph is None:
+                graph = build_road_graph(network_work)
+            result = _cluster_prepared_points(
+                inside=inside,
+                graph=graph,
+                config=config,
+                point_id_col=point_id_col,
+            )
+        else:
+            result = _empty_cluster_result(inside)
         outputs.append(write_geoparquet(output_path, result, force=force))
 
     return outputs
